@@ -17,9 +17,9 @@ Amazon connectivity, consent UX, hosted images or latency. Amazon deployment rem
 separate Alexa AI CLI operation requiring preview access.
 
 Run `composer test`, `composer style:check` and `composer validate --strict`. Test commands
-through the real CLI console and HTTP behavior through an installed host. CI installs the
-upstream RC branches temporarily until their required stable versions are available;
-published manifests must keep stable constraints and contain no sibling repositories.
+through the real CLI console and HTTP behavior through an installed host. CI installs
+published stable dependencies with Composer; manifests must keep stable constraints and
+contain no sibling repositories.
 PHP 8.3 is the minimum. Follow the shared PER Coding Style 3.0 rules and formatter.
 
 Unreleased user documentation belongs in `nafphp/docs/drafts/`, outside the published site.

@@ -20,6 +20,6 @@ jobs:
           extensions: dom, mbstring, pdo_sqlite, readline
           coverage: none
       - run: composer validate --strict
-      - run: php tools/install-test-dependencies.php
+      - run: composer install --prefer-dist --no-interaction --no-progress
       - run: composer test
       - run: composer style:check
