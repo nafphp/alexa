@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Naf\Alexa;
 
 use InvalidArgumentException;
+use Naf\OAuth\Server\Core\ScopePolicy;
+use Naf\OAuth\Server\Exception\ConfigurationException;
 
 /** Read the effective host configuration without mutating another plugin's settings. */
 final readonly class Settings
@@ -70,6 +72,13 @@ final readonly class Settings
             $problems[] = 'mcp:oauth:authorization_servers must contain this public_url only.';
         }
         $oauth = $this->config['oauth_server'] ?? [];
+
+        try {
+            new ScopePolicy((array) ($oauth['scopes'] ?? []));
+        } catch (ConfigurationException $exception) {
+            $problems[] = $exception->getMessage();
+        }
+
         if (($oauth['audience'] ?? '') !== $this->resource()) {
             $problems[] = 'oauth_server:audience must match the canonical MCP resource.';
         }

@@ -10,8 +10,8 @@
     "naf/cli": "^0.2.3",
     "naf/database": "^0.2.4",
     "naf/framework": "^0.2.8",
-    "naf/mcp": "^0.2.5",
-    "naf/oauth-server": "^0.2.4"
+    "naf/mcp": "^0.2.6",
+    "naf/oauth-server": "^0.2.5"
   },
   "require-dev": {
     "friendsofphp/php-cs-fixer": "3.95.25",

@@ -9,7 +9,9 @@ use Naf\Auth\Support\PasswordHasher;
 use Naf\CLI\Core\Console;
 use Naf\Core\Config;
 use Naf\MCP\Support\ToolRegistry;
+use Naf\MCP\Tools\ScopedToolInterface;
 use Naf\MCP\Tools\ToolInterface;
+use Naf\MCP\Tools\UserToolInterface;
 use Naf\OAuth\Server\Store\ClientStoreInterface;
 use Naf\OAuth\Server\Store\PdoClients;
 use PDO;
@@ -29,6 +31,7 @@ final class CommandsTest extends TestCase
         $this->connection = new PDO('sqlite::memory:');
         app()->container()->set(PDO::class, $this->connection);
         app()->container()->set(ClientStoreInterface::class, new PdoClients($this->connection, new PasswordHasher(PASSWORD_BCRYPT, ['cost' => 4])));
+        app()->container()->set(ToolRegistry::class, new ToolRegistry('mcp:service'));
         app()->container()->get(ToolRegistry::class)->register(new class implements ToolInterface {
             public function name(): string
             {
@@ -138,6 +141,89 @@ final class CommandsTest extends TestCase
                 unlink($path);
             }
         }
+    }
+
+    public function testDoctorRejectsMixedServiceAndPersonalScopesThroughTheConsole(): void
+    {
+        [$status, $output] = $this->execute('alexa:setup', ['--migrate']);
+        self::assertSame(0, $status, $output);
+        app()->container()->get(ToolRegistry::class)->register(new class implements ToolInterface, ScopedToolInterface {
+            public function name(): string
+            {
+                return 'mixed';
+            }
+
+            public function description(): string
+            {
+                return 'Unsafe mixed scopes.';
+            }
+
+            public function inputSchema(): array
+            {
+                return ['type' => 'object'];
+            }
+
+            public function requiredScopes(): array
+            {
+                return ['mcp:service', 'mcp:tools'];
+            }
+
+            public function handle(array $args): mixed
+            {
+                return [];
+            }
+        });
+        [$status, $output] = $this->execute('alexa:doctor', ['--server-only']);
+        self::assertSame(1, $status, $output);
+        self::assertStringContainsString('mixed', $output);
+    }
+
+    public function testPersonalToolsCannotHaveEmptyScopes(): void
+    {
+        $this->execute('alexa:setup', ['--migrate']);
+        app()->container()->get(ToolRegistry::class)->register(new class implements UserToolInterface, ScopedToolInterface {
+            public function name(): string
+            {
+                return 'empty_personal';
+            }
+
+            public function description(): string
+            {
+                return 'Personal tool with no scope.';
+            }
+
+            public function inputSchema(): array
+            {
+                return ['type' => 'object'];
+            }
+
+            public function requiredScopes(): array
+            {
+                return [];
+            }
+
+            public function handle(array $args): mixed
+            {
+                return [];
+            }
+        });
+        [$status, $output] = $this->execute('alexa:doctor', ['--server-only']);
+        self::assertSame(1, $status, $output);
+        self::assertStringContainsString('empty_personal', $output);
+    }
+
+    public function testInvalidPermissionConfigurationFailsSetupBeforeWritesAndDoctor(): void
+    {
+        $configuration                                                      = $this->base;
+        $configuration['oauth_server']['scopes']['mcp:tools']['permission'] = false;
+        app()->container()->set(Settings::class, new Settings($configuration));
+        [$status, $output] = $this->execute('alexa:setup', ['--migrate']);
+        self::assertSame(1, $status, $output);
+        self::assertStringContainsString('mcp:tools', $output);
+        self::assertSame(0, (int) $this->connection->query("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'")->fetchColumn());
+        [$status, $output] = $this->execute('alexa:doctor', ['--server-only']);
+        self::assertSame(1, $status);
+        self::assertStringContainsString('permission must be null', $output);
     }
 
     public static function listing(): array
