@@ -108,8 +108,8 @@ final class DoctorCommand extends AbstractCommand
                     if (!$this->settings->accountLinking() || $scopes === [] || array_diff($scopes, $this->settings->userScopes()) !== []) {
                         throw new RuntimeException($tool->name() . ': enable account linking and declare its user scopes.');
                     }
-                } elseif ($scopes !== [] && !in_array('mcp:service', $scopes, true)) {
-                    throw new RuntimeException($tool->name() . ': personal tools must also implement UserToolInterface.');
+                } elseif (array_diff($scopes, ['mcp:service']) !== []) {
+                    throw new RuntimeException($tool->name() . ': non-user tools may only require mcp:service; personal tools must implement UserToolInterface with declared user scopes.');
                 }
             }
         });

@@ -17,9 +17,11 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php }}
-          extensions: dom, mbstring, pdo_sqlite, readline
+          extensions: dom, mbstring, pdo_sqlite, readline, pcntl, posix
           coverage: none
       - run: composer validate --strict
       - run: composer install --prefer-dist --no-interaction --no-progress
       - run: composer test
+        env:
+          NAF_SECURITY_HTTP_WORKERS: '4'
       - run: composer style:check
