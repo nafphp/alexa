@@ -27,6 +27,30 @@ use function Naf\route;
 define('BASE_PATH', getenv('NAF_ALEXA_HOST_ROOT'));
 require dirname(__DIR__, 2) . '/vendor/autoload.php';
 
+// Test-only barrier: neither endpoint may proceed before another HTTP worker arrives.
+$barrier = $_SERVER['HTTP_X_NAF_TEST_BARRIER'] ?? '';
+if (getenv('NAF_SECURITY_HTTP_WORKERS') === '4' && preg_match('/\A[a-f0-9]{32}\z/', $barrier)) {
+    $path = BASE_PATH . '/barrier-' . $barrier;
+    $file = fopen($path, 'c+');
+    flock($file, LOCK_EX);
+    fseek($file, 0, SEEK_END);
+    fwrite($file, getmypid() . "\n");
+    fflush($file);
+    flock($file, LOCK_UN);
+    fclose($file);
+    $deadline = microtime(true) + 4;
+    do {
+        $participants = file($path, FILE_IGNORE_NEW_LINES);
+        if (count(array_unique($participants)) === 2) {
+            break;
+        }
+        if (microtime(true) >= $deadline) {
+            throw new RuntimeException('A second HTTP worker did not reach the test barrier.');
+        }
+        usleep(1000);
+    } while (true);
+}
+
 app()->container()->set(PasswordHasher::class, new PasswordHasher(PASSWORD_BCRYPT, ['cost' => 4]));
 auth()->addProvider('test', new class implements ProviderInterface {
     public function authenticate(#[SensitiveParameter] CredentialsInterface $credentials): ?IdentityInterface
@@ -42,7 +66,8 @@ auth()->addProvider('test', new class implements ProviderInterface {
         return isset($permissions[$identifier]) ? new Identity($identifier, permissions: $permissions[$identifier]) : null;
     }
 });
-route()->add('GET', '/login', static fn() => response('<form method="post"><input name="_csrf" value="' . csrf()->generate() . '"></form>'), 'login');
+route()->add('GET', '/login', static fn() => response('<!doctype html><html lang="en"><title>Audit host sign in</title><main><h1>Audit host sign in</h1><form method="post"><input type="hidden" name="_csrf" value="' . csrf()->generate() . '"><label>Username <input name="username" autocomplete="username" required></label><label>Password <input type="password" name="password" autocomplete="current-password" required></label><button>Sign in</button></form></main></html>'), 'login');
+route()->add('GET', '/', static fn() => response('<!doctype html><html lang="en"><title>Audit host</title><main><h1>Audit host</h1><p>Signed in.</p></main></html>'), 'home');
 route()->add('POST', '/login', static function () {
     $signedIn = auth()->authenticate(new PasswordCredentials((string) param()->get('username'), (string) param()->get('password')), 'test');
 

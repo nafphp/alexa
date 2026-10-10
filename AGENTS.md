@@ -23,5 +23,8 @@ through the real CLI console and HTTP behavior through an installed host. CI ins
 published stable dependencies with Composer; manifests must keep stable constraints and
 contain no sibling repositories.
 PHP 8.3 is the minimum. Follow the shared PER Coding Style 3.0 rules and formatter.
+On POSIX with PCNTL, run `NAF_SECURITY_HTTP_WORKERS=4 composer test` for real parallel
+HTTP refresh/revocation coverage. CI enables this mode; test barriers prove distinct workers
+overlap, and teardown terminates their entire isolated process group.
 
 Unreleased user documentation belongs in `nafphp/docs/drafts/`, outside the published site.

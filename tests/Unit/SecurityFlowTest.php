@@ -19,6 +19,7 @@ final class SecurityFlowTest extends TestCase
     private array $jars = [];
     private array $ids;
     private array $secrets;
+    private bool $multipleWorkers = false;
     private const string RESOURCE = 'https://alexa.example.test/mcp';
     private const string REDIRECT = 'https://amazon.example.test/callback';
 
@@ -39,11 +40,18 @@ final class SecurityFlowTest extends TestCase
         ];
         file_put_contents($this->root . '/app/config.php', '<?php return ' . var_export($config, true) . ';');
         $this->permissions(['notes.read', 'notes.delete', 'mcp:tools']);
-        $fixture     = dirname(__DIR__) . '/Fixtures/security-host.php';
-        $environment = ['NAF_ALEXA_HOST_ROOT' => $this->root, 'APP_ENV' => 'test'] + getenv();
-        $setup       = proc_open([PHP_BINARY, $fixture, 'alexa:setup', '--migrate'], [0 => ['file', '/dev/null', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, null, $environment);
-        $output      = stream_get_contents($pipes[1]);
-        $errors      = stream_get_contents($pipes[2]);
+        $fixture               = dirname(__DIR__) . '/Fixtures/security-host.php';
+        $environment           = ['NAF_ALEXA_HOST_ROOT' => $this->root, 'APP_ENV' => 'test'] + getenv();
+        $this->multipleWorkers = getenv('NAF_SECURITY_HTTP_WORKERS') === '4';
+        if ($this->multipleWorkers) {
+            self::assertTrue(function_exists('posix_setsid') && function_exists('posix_kill') && function_exists('pcntl_exec'), 'Parallel HTTP tests require POSIX and PCNTL.');
+            $environment['PHP_CLI_SERVER_WORKERS'] = '4';
+        } else {
+            unset($environment['PHP_CLI_SERVER_WORKERS']);
+        }
+        $setup  = proc_open([PHP_BINARY, $fixture, 'alexa:setup', '--migrate'], [0 => ['file', '/dev/null', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, null, $environment);
+        $output = stream_get_contents($pipes[1]);
+        $errors = stream_get_contents($pipes[2]);
         fclose($pipes[1]);
         fclose($pipes[2]);
         self::assertSame(0, proc_close($setup), $output . $errors);
@@ -54,7 +62,12 @@ final class SecurityFlowTest extends TestCase
         $listener      = stream_socket_server('tcp://127.0.0.1:0', $error, $message);
         $this->address = stream_socket_get_name($listener, false);
         fclose($listener);
-        $this->process = proc_open([PHP_BINARY, '-d', 'session.save_path=' . $this->root, '-S', $this->address, $fixture], [0 => ['file', '/dev/null', 'r'], 1 => ['file', $this->root . '/server.log', 'a'], 2 => ['file', $this->root . '/server.log', 'a']], $pipes, null, $environment);
+        $command = [PHP_BINARY, '-d', 'session.save_path=' . $this->root, '-S', $this->address, $fixture];
+        if ($this->multipleWorkers) {
+            // Isolate the server and all its workers so teardown also stops its children.
+            $command = [PHP_BINARY, dirname(__DIR__) . '/Fixtures/http-workers.php', ...array_slice($command, 1)];
+        }
+        $this->process = proc_open($command, [0 => ['file', '/dev/null', 'r'], 1 => ['file', $this->root . '/server.log', 'a'], 2 => ['file', $this->root . '/server.log', 'a']], $pipes, null, $environment);
         for ($i = 0; $i < 100; ++$i) {
             $socket = @stream_socket_client('tcp://' . $this->address, $error, $message, 0.1);
             if (is_resource($socket)) {
@@ -70,6 +83,9 @@ final class SecurityFlowTest extends TestCase
     protected function tearDown(): void
     {
         if (isset($this->process) && is_resource($this->process)) {
+            if ($this->multipleWorkers) {
+                posix_kill(-proc_get_status($this->process)['pid'], 15);
+            }
             proc_terminate($this->process);
             proc_close($this->process);
         }
@@ -299,44 +315,56 @@ final class SecurityFlowTest extends TestCase
     public function testOutstandingRefreshAndRevocationRequestsEndTheFamily(): void
     {
         $this->login('alice');
-        $user      = $this->grant('alice')['json'];
-        $responses = $this->concurrent([
-            ['/oauth/token', ['grant_type' => 'refresh_token', 'refresh_token' => $user['refresh_token']]],
-            ['/oauth/token', ['grant_type' => 'refresh_token', 'refresh_token' => $user['refresh_token']]],
-        ]);
-        $statuses = array_column($responses, 'status');
-        sort($statuses);
-        self::assertSame([200, 400], $statuses);
-        foreach ($responses as $reply) {
-            if ($reply['status'] === 200) {
-                self::assertSame(401, $this->call('own_note', 'a', $reply['json']['access_token'])['status']);
+        for ($attempt = 0; $attempt < 10; ++$attempt) {
+            $user      = $this->grant('alice')['json'];
+            $responses = $this->concurrent([
+                ['/oauth/token', ['grant_type' => 'refresh_token', 'refresh_token' => $user['refresh_token']]],
+                ['/oauth/token', ['grant_type' => 'refresh_token', 'refresh_token' => $user['refresh_token']]],
+            ]);
+            $statuses = array_column($responses, 'status');
+            sort($statuses);
+            self::assertSame([200, 400], $statuses);
+            foreach ($responses as $reply) {
+                if ($reply['status'] === 200) {
+                    self::assertSame(401, $this->call('own_note', 'a', $reply['json']['access_token'])['status']);
+                }
             }
+            $user      = $this->grant('alice')['json'];
+            $responses = $this->concurrent([
+                ['/oauth/token', ['grant_type' => 'refresh_token', 'refresh_token' => $user['refresh_token']]],
+                ['/oauth/revoke', ['token' => $user['refresh_token']]],
+            ]);
+            self::assertSame(200, $responses[1]['status']);
+            self::assertContains($responses[0]['status'], [200, 400]);
+            if ($responses[0]['status'] === 200) {
+                self::assertSame(401, $this->call('own_note', 'a', $responses[0]['json']['access_token'])['status']);
+                self::assertSame(400, $this->request('/oauth/token', ['grant_type' => 'refresh_token', 'refresh_token' => $responses[0]['json']['refresh_token']], basic: 1)['status']);
+            }
+            self::assertSame(401, $this->call('own_note', 'a', $user['access_token'])['status']);
         }
-        $user      = $this->grant('alice')['json'];
-        $responses = $this->concurrent([
-            ['/oauth/token', ['grant_type' => 'refresh_token', 'refresh_token' => $user['refresh_token']]],
-            ['/oauth/revoke', ['token' => $user['refresh_token']]],
-        ]);
-        self::assertSame(200, $responses[1]['status']);
-        self::assertContains($responses[0]['status'], [200, 400]);
-        if ($responses[0]['status'] === 200) {
-            self::assertSame(401, $this->call('own_note', 'a', $responses[0]['json']['access_token'])['status']);
-            self::assertSame(400, $this->request('/oauth/token', ['grant_type' => 'refresh_token', 'refresh_token' => $responses[0]['json']['refresh_token']], basic: 1)['status']);
-        }
-        self::assertSame(401, $this->call('own_note', 'a', $user['access_token'])['status']);
     }
 
-    /** Send both requests before reading either response; database races have separate real-process tests. */
+    /** With multiple workers, a barrier proves both HTTP requests overlap in distinct processes. */
     private function concurrent(array $requests): array
     {
         $sockets = [];
+        $barrier = bin2hex(random_bytes(16));
         foreach ($requests as [$path, $parameters]) {
             $socket = stream_socket_client('tcp://' . $this->address, $error, $message, 5);
             stream_set_timeout($socket, 5);
-            $body  = http_build_query($parameters);
-            $basic = base64_encode($this->ids[1] . ':' . $this->secrets[1]);
-            fwrite($socket, "POST $path HTTP/1.1\r\nHost: {$this->address}\r\nAuthorization: Basic $basic\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: " . strlen($body) . "\r\nConnection: close\r\n\r\n" . $body);
+            $body            = http_build_query($parameters);
+            $basic           = base64_encode($this->ids[1] . ':' . $this->secrets[1]);
+            $synchronization = $this->multipleWorkers ? "X-NAF-Test-Barrier: $barrier\r\n" : '';
+            fwrite($socket, "POST $path HTTP/1.1\r\nHost: {$this->address}\r\nAuthorization: Basic $basic\r\n$synchronization" . "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: " . strlen($body) . "\r\nConnection: close\r\n\r\n" . $body);
             $sockets[] = $socket;
+            if ($this->multipleWorkers && count($sockets) === 1) {
+                // Do not let one idle worker accept both sockets before dispatching either.
+                $deadline = microtime(true) + 2;
+                while (!is_file($this->root . '/barrier-' . $barrier) && microtime(true) < $deadline) {
+                    usleep(1000);
+                }
+                self::assertFileExists($this->root . '/barrier-' . $barrier, 'The first HTTP worker must be waiting before the second connection starts.');
+            }
         }
         $responses = [];
         foreach ($sockets as $socket) {
@@ -344,6 +372,10 @@ final class SecurityFlowTest extends TestCase
             fclose($socket);
             [$headers, $body] = explode("\r\n\r\n", $raw, 2);
             $responses[]      = ['status' => (int) explode(' ', $headers)[1], 'json' => json_decode($body, true)];
+        }
+        if ($this->multipleWorkers) {
+            $participants = file($this->root . '/barrier-' . $barrier, FILE_IGNORE_NEW_LINES);
+            self::assertCount(2, array_unique($participants), 'Both HTTP requests must reach the barrier in distinct workers.');
         }
 
         return $responses;
@@ -449,10 +481,12 @@ final class SecurityFlowTest extends TestCase
         if ($basic !== null) {
             $headers[] = 'Authorization: Basic ' . base64_encode($this->ids[$basic] . ':' . $this->secrets[$basic]);
         }
-        $context = stream_context_create(['http' => ['method' => $body === null ? 'GET' : 'POST', 'header' => implode("\r\n", $headers), 'content' => $body === null ? '' : ($json ? json_encode($body, JSON_THROW_ON_ERROR) : http_build_query($body)), 'ignore_errors' => true, 'follow_location' => 0, 'timeout' => 5]]);
-        $raw     = file_get_contents('http://' . $this->address . $path, false, $context);
-        $reply   = [];
-        foreach ($http_response_header as $line) {
+        $context              = stream_context_create(['http' => ['method' => $body === null ? 'GET' : 'POST', 'header' => implode("\r\n", $headers), 'content' => $body === null ? '' : ($json ? json_encode($body, JSON_THROW_ON_ERROR) : http_build_query($body)), 'ignore_errors' => true, 'follow_location' => 0, 'timeout' => 5]]);
+        $http_response_header = []; // PHP 8.3 requires a declared local for its HTTP wrapper.
+        $raw                  = file_get_contents('http://' . $this->address . $path, false, $context);
+        $responseHeaders      = function_exists('http_get_last_response_headers') ? http_get_last_response_headers() : $http_response_header;
+        $reply                = [];
+        foreach ($responseHeaders as $line) {
             if (!str_contains($line, ':')) {
                 continue;
             }
@@ -464,6 +498,6 @@ final class SecurityFlowTest extends TestCase
             }
         }
 
-        return ['status' => (int) explode(' ', $http_response_header[0])[1], 'json' => json_decode($raw, true), 'body' => $raw, 'headers' => $reply];
+        return ['status' => (int) explode(' ', $responseHeaders[0])[1], 'json' => json_decode($raw, true), 'body' => $raw, 'headers' => $reply];
     }
 }
